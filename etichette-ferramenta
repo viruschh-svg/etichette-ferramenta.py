@@ -1,0 +1,158 @@
+import cv2
+import pytesseract
+import re
+from reportlab.lib.pagesizes import mm
+from reportlab.pdfgen import canvas
+from reportlab.graphics.shapes import Drawing  # <-- Importato per correggere il bug del barcode
+from reportlab.graphics.barcode import code128
+
+def estrai_dati_da_foto(percorso_immagine):
+    """
+    Legge l'immagine della busta/etichetta tramite OpenCV, 
+    applica un filtro e utilizza Tesseract OCR per estrarre i dati chiave.
+    """
+    img = cv2.imread(percorso_immagine)
+    if img is None:
+        raise FileNotFoundError(f"Impossibile trovare l'immagine: {percorso_immagine}")
+
+    # Pre-processing: conversione in scala di grigi e binarizzazione per l'OCR
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+
+    # Estrazione del testo con OCR (Aggiunto config psm 6 per migliorare codici alfanumerici)
+    config_tesseract = "--psm 6"
+    testo_estratto = pytesseract.image_to_string(thresh, config=config_tesseract)
+    print("--- Testo Rilevato dall'OCR ---")
+    print(testo_estratto)
+    print("-------------------------------")
+
+    # Valori di default
+    dati = {
+        "titolo": "VITE CILINDRICA BRUGOLA",
+        "misura": "M4 x 14 mm",
+        "norma": "DIN 912 / ISO 4762",
+        "dettagli": "Passo 0.7 | HEX 3mm",
+        "produttore": "BOSSARD (BN 610)",
+        "quantita": "500 PCS",
+        "pn": "B4X14/BN610",
+        "mpn": "1111353"
+    }
+
+    # Esempi di parsing dinamico con Regex basati sui tag tipici delle etichette
+    match_pn = re.search(r'(?:N\.\s*art\.|PN):?\s*([A-Za-z0-9\/\-]+)', testo_estratto)
+    if match_pn:
+        dati["pn"] = match_pn.group(1).strip()
+        dati["mpn"] = dati["pn"]
+
+    match_qty = re.search(r'(\d+)\s*pcs', testo_estratto, re.IGNORECASE)
+    if match_qty:
+        dati["quantita"] = f"{match_qty.group(1)} PCS"
+
+    return dati
+
+def genera_pdf_etichetta(dati, nome_file_output="etichetta_4x9.pdf"):
+    """
+    Genera un PDF in formato 4x9 cm (90x40 mm) strutturato esattamente 
+    con lo stile del template di riferimento.
+    """
+    larghezza = 90 * mm
+    altezza = 40 * mm
+
+    c = canvas.Canvas(nome_file_output, pagesize=(larghezza, altezza))
+
+    # 1. Bordo esterno dell'etichetta
+    c.setLineWidth(1)
+    c.rect(1 * mm, 1 * mm, larghezza - 2 * mm, altezza - 2 * mm)
+
+    # 2. Intestazione: Titolo e Box Quantità Nero
+    c.setFont("Helvetica-Bold", 9.5)
+    c.drawString(4 * mm, altezza - 6.5 * mm, dati["titolo"])
+
+    qta_box_w = 20 * mm
+    qta_box_h = 5 * mm
+    qta_x = larghezza - 4 * mm - qta_box_w
+    qta_y = altezza - 8 * mm
+
+    c.setFillColorRGB(0, 0, 0)
+    c.rect(qta_x, qta_y, qta_box_w, qta_box_h, fill=1, stroke=0)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawCentredString(qta_x + (qta_box_w / 2), qta_y + 1.3 * mm, dati["quantita"])
+
+    # Linea separatrice sotto l'intestazione
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(1)
+    c.line(4 * mm, altezza - 9.5 * mm, larghezza - 4 * mm, altezza - 9.5 * mm)
+
+    # 3. Specifiche tecniche (Lato Sinistro)
+    y_curr = altezza - 14 * mm
+    spacing = 3.8 * mm
+
+    def scrivi_riga(label, valore, y):
+        c.setFont("Helvetica", 7.5)
+        c.drawString(4 * mm, y, label)
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(22 * mm, y, valore)
+
+    scrivi_riga("MISURA:", dati["misura"], y_curr)
+    y_curr -= spacing
+    scrivi_riga("NORMA:", dati["norma"], y_curr)
+    y_curr -= spacing
+    scrivi_riga("DETTAGLI:", dati["dettagli"], y_curr)
+    y_curr -= spacing
+    scrivi_riga("PROD:", dati["produttore"], y_curr)
+
+    # Linea di separazione inferiore sopra il codice a barre
+    c.setLineWidth(0.8)
+    c.line(4 * mm, 8.5 * mm, larghezza - 4 * mm, 8.5 * mm)
+
+    # 4. Divisore tratteggiato verticale e Icona (Lato Destro)
+    c.setDash(2, 2)
+    c.line(65 * mm, 9.5 * mm, 65 * mm, altezza - 10.5 * mm)
+    c.setDash() # Ripristina linea continua
+
+    # Icona componente stilizzata (Raffigurazione vite)
+    icon_x = 77.5 * mm
+    icon_y = 20 * mm
+    c.setFillColorRGB(0, 0, 0)
+    c.rect(icon_x - 1.5 * mm, icon_y + 1 * mm, 3 * mm, 2 * mm, fill=1) # Testa vite
+    c.rect(icon_x - 1 * mm, icon_y - 4 * mm, 2 * mm, 5 * mm, fill=1)  # Gambo
+
+    # 5. Piè di pagina: Codici a barre e identificativi PN/MPN
+    c.setFont("Helvetica", 6.5)
+    c.drawString(4 * mm, 3.5 * mm, f"PN : {dati['pn']}")
+    c.drawRightString(larghezza - 4 * mm, 3.5 * mm, f"MPN : {dati['mpn']}")
+
+    # Generazione Codice a Barre Code128 (Risolto bug di ReportLab usando un Drawing)
+    try:
+        barcode_width = 40 * mm
+        barcode_height = 4.5 * mm
+        
+        # Creiamo un container Drawing per ospitare correttamente il codice a barre
+        d = Drawing(barcode_width, barcode_height)
+        barcode = code128.Code128(dati["pn"], barHeight=barcode_height, barWidth=0.25 * mm)
+        d.add(barcode)
+        
+        # Disegniamo il container centrato sul fondo dell'etichetta
+        d.drawOn(c, 25 * mm, 4.2 * mm)
+    except Exception as e:
+        print(f"Errore nella generazione del barcode: {e}")
+
+    c.save()
+    print(f"PDF generato con successo: {nome_file_output}")
+
+if __name__ == "__main__":
+    # Inserisci qui il percorso della foto scattata alla busta di ferramenta
+    percorso_foto = "112853.jpg"
+
+    try:
+        dati_estratto = estrai_dati_da_foto(percorso_foto)
+        genera_pdf_etichetta(dati_estratto, "etichetta_risultato_4x9.pdf")
+    except Exception as e:
+        # Corretto l'errore di sintassi fegon=>f
+        print(f"Errore durante l'esecuzione: {e}")
+streamlit
+opencv-python-headless
+pytesseract
+reportlab
+pillow
